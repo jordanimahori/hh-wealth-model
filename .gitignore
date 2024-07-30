@@ -202,3 +202,5 @@ vignettes/*.pdf
 
 # pkgdown site
 docs/
+data/dhs_tfrecords
+data/dhs_tfrecords_raw

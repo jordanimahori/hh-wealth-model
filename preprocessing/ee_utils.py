@@ -9,6 +9,7 @@ import time
 from tqdm.auto import tqdm
 
 
+
 def df_to_fc(df: pd.DataFrame, lat_colname: str = 'lat',
              lon_colname: str = 'lon') -> ee.FeatureCollection:
     '''Create a ee.FeatureCollection from a pd.DataFrame.
@@ -96,26 +97,26 @@ def decode_qamask(img: ee.Image) -> ee.Image:
     Pixel QA Bit Flags (universal across Landsat 5/7/8)
     Bit  Attribute
     0    Fill
-    1    Clear
-    2    Water
-    3    Cloud Shadow
-    4    Snow
-    5    Cloud
+    3    Cloud
+    4    Cloud Shadow
+    5    Snow
+    6    Clear
+    7    Water
     '''
-    qa = img.select('pixel_qa')
-    clear = qa.bitwiseAnd(2).neq(0)  # 0 = not clear, 1 = clear
+    qa = img.select('QA_PIXEL')
+    clear = qa.bitwiseAnd(1 << 6).neq(0)  # 0 = not clear, 1 = clear
     clear = clear.updateMask(clear).rename(['pxqa_clear'])
 
-    water = qa.bitwiseAnd(4).neq(0)  # 0 = not water, 1 = water
+    water = qa.bitwiseAnd(1 << 7).neq(0)  # 0 = not water, 1 = water
     water = water.updateMask(water).rename(['pxqa_water'])
 
-    cloud_shadow = qa.bitwiseAnd(8).eq(0)  # 0 = shadow, 1 = not shadow
+    cloud_shadow = qa.bitwiseAnd(1 << 4).eq(0)  # 0 = shadow, 1 = not shadow
     cloud_shadow = cloud_shadow.updateMask(cloud_shadow).rename(['pxqa_cloudshadow'])
 
-    snow = qa.bitwiseAnd(16).eq(0)  # 0 = snow, 1 = not snow
+    snow = qa.bitwiseAnd(1 << 5).eq(0)  # 0 = snow, 1 = not snow
     snow = snow.updateMask(snow).rename(['pxqa_snow'])
 
-    cloud = qa.bitwiseAnd(32).eq(0)  # 0 = cloud, 1 = not cloud
+    cloud = qa.bitwiseAnd(1 << 3).eq(0)  # 0 = cloud, 1 = not cloud
     cloud = cloud.updateMask(cloud).rename(['pxqa_cloud'])
 
     masks = ee.Image.cat([clear, water, cloud_shadow, snow, cloud])
@@ -324,142 +325,120 @@ def wait_on_tasks(tasks: Mapping[Any, ee.batch.Task],
 
 
 class LandsatSR:
-    def __init__(self, filterpoly: ee.Geometry, start_date: str,
-                 end_date: str) -> None:
-        '''
+    def __init__(self, start_date: str, end_date: str) -> None:
+        """
         Args
-        - filterpoly: ee.Geometry
         - start_date: str, string representation of start date
         - end_date: str, string representation of end date
-        '''
-        self.filterpoly = filterpoly
+        """
         self.start_date = start_date
         self.end_date = end_date
 
-        self.l8 = self.init_coll('LANDSAT/LC08/C01/T1_SR').map(self.rename_l8).map(self.rescale_l8)
-        self.l7 = self.init_coll('LANDSAT/LE07/C01/T1_SR').map(self.rename_l57).map(self.rescale_l57)
-        self.l5 = self.init_coll('LANDSAT/LT05/C01/T1_SR').map(self.rename_l57).map(self.rescale_l57)
+        #self.l4 = (
+        #    ee.ImageCollection('LANDSAT/LT04/C02/T1_L2')
+        #    .filter('WRS_ROW < 122')                            # Remove nighttime images
+        #    .filterDate(self.start_date, self.end_date)         # Filter to desired range
+        #    .linkCollection(
+        #        ee.ImageCollection('LANDSAT/LT04/C02/T1_TOA'),
+        #        linkedBands='B6')
+        #    .map(self.prep_l47)
+        #)
 
-        self.merged = self.l5.merge(self.l7).merge(self.l8).sort('system:time_start')
+        self.l5 = (
+            ee.ImageCollection('LANDSAT/LT05/C02/T1_L2')
+            .filter('WRS_ROW < 122')                            # Remove nighttime images
+            .filterDate(self.start_date, self.end_date)         # Filter to desired range
+            .linkCollection(
+                ee.ImageCollection('LANDSAT/LT05/C02/T1_TOA'),
+                linkedBands='B6')
+            .map(self.prep_l47)
+        )
 
-    def init_coll(self, name: str) -> ee.ImageCollection:
-        '''
-        Creates a ee.ImageCollection containing images of desired points
-        between the desired start and end dates.
+        self.l7 = (
+            ee.ImageCollection('LANDSAT/LE07/C02/T1_L2')
+            .filter('WRS_ROW < 122')                            # Remove nighttime images
+            .filterDate(self.start_date, self.end_date)         # Filter to desired range
+            .linkCollection(
+                ee.ImageCollection('LANDSAT/LE07/C02/T1_TOA'),
+                linkedBands='B6_VCID_1')
+            .map(self.prep_l47)
+        )
 
-        Args
-        - name: str, name of collection
+        self.l8 = (
+            ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+            .filter('WRS_ROW < 122')                            # Remove nighttime images
+            .filterDate(self.start_date, self.end_date)         # Filter to desired range
+            .linkCollection(
+                ee.ImageCollection('LANDSAT/LC08/C02/T1_TOA'),
+                linkedBands='B10')
+            .map(self.prep_l89)
+        )
 
-        Returns: ee.ImageCollection
-        '''
-        return (ee.ImageCollection(name)
-                .filterBounds(self.filterpoly)
-                .filterDate(self.start_date, self.end_date))
+        #self.l9 = (
+        #    ee.ImageCollection('LANDSAT/LC09/C02/T1_L2')
+        #    .filter('WRS_ROW < 122')                            # Remove nighttime images
+        #    .filterDate(self.start_date, self.end_date)         # Filter to desired range
+        #    .linkCollection(
+        #        ee.ImageCollection('LANDSAT/LC09/C02/T1_TOA'),
+        #        linkedBands='B10')
+        #    .map(self.prep_l89)
+        #)
 
-    @staticmethod
-    def rename_l8(img: ee.Image) -> ee.Image:
-        '''
-        Args
-        - img: ee.Image, Landsat 8 image
-
-        Returns
-        - img: ee.Image, with bands renamed
-
-        See: https://developers.google.com/earth-engine/datasets/catalog/LANDSAT_LC08_C01_T1_SR
-
-        Name       Scale Factor Description
-        B1         0.0001       Band 1 (Ultra Blue) surface reflectance, 0.435-0.451 um
-        B2         0.0001       Band 2 (Blue) surface reflectance, 0.452-0.512 um
-        B3         0.0001       Band 3 (Green) surface reflectance, 0.533-0.590 um
-        B4         0.0001       Band 4 (Red) surface reflectance, 0.636-0.673 um
-        B5         0.0001       Band 5 (Near Infrared) surface reflectance, 0.851-0.879 um
-        B6         0.0001       Band 6 (Shortwave Infrared 1) surface reflectance, 1.566-1.651 um
-        B7         0.0001       Band 7 (Shortwave Infrared 2) surface reflectance, 2.107-2.294 um
-        B10        0.1          Band 10 brightness temperature (Kelvin), 10.60-11.19 um
-        B11        0.1          Band 11 brightness temperature (Kelvin), 11.50-12.51 um
-        sr_aerosol              Aerosol attributes, see Aerosol QA table
-        pixel_qa                Pixel quality attributes, see Pixel QA table
-        radsat_qa               Radiometric saturation QA, see Radsat QA table
-        '''
-        newnames = ['AEROS', 'BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2',
-                    'TEMP1', 'TEMP2', 'sr_aerosol', 'pixel_qa', 'radsat_qa']
-        return img.rename(newnames)
-
-    @staticmethod
-    def rescale_l8(img: ee.Image) -> ee.Image:
-        '''
-        Args
-        - img: ee.Image, Landsat 8 image, with bands already renamed
-            by rename_l8()
-
-        Returns
-        - img: ee.Image, with bands rescaled
-        '''
-        opt = img.select(['AEROS', 'BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2'])
-        therm = img.select(['TEMP1', 'TEMP2'])
-        masks = img.select(['sr_aerosol', 'pixel_qa', 'radsat_qa'])
-
-        opt = opt.multiply(0.0001)
-        therm = therm.multiply(0.1)
-
-        scaled = ee.Image.cat([opt, therm, masks]).copyProperties(img)
-        # system properties are not copied
-        scaled = scaled.set('system:time_start', img.get('system:time_start'))
-        return scaled
+        # Merge all collections
+        self.all = self.l5.merge(self.l7).merge(self.l8)
 
     @staticmethod
-    def rename_l57(img: ee.Image) -> ee.Image:
-        '''
-        Args
-        - img: ee.Image, Landsat 5/7 image
+    def prep_l47(image: ee.Image) -> ee.Image:
+        """Scale and mask clouds for L4/5/7 Collection 2 Surface Reflectance"""
 
-        Returns
-        - img: ee.Image, with bands renamed
+        # Scale bands
+        optical_bands = image.select('SR_B.').multiply(0.0000275).add(-0.2)
+        # thermal_band = image.select('ST_B6').multiply(0.00341802).add(149.0)
 
-        See: https://developers.google.com/earth-engine/datasets/catalog/LANDSAT_LT05_C01_T1_SR
-             https://developers.google.com/earth-engine/datasets/catalog/LANDSAT_LE07_C01_T1_SR
+        # Replace thermal pixels with corresponding TOA values (SR missing over much of SSA)
+        thermal_band = image.select('B6(_VCID_1)?')
 
-        Name             Scale Factor Description
-        B1               0.0001       Band 1 (blue) surface reflectance, 0.45-0.52 um
-        B2               0.0001       Band 2 (green) surface reflectance, 0.52-0.60 um
-        B3               0.0001       Band 3 (red) surface reflectance, 0.63-0.69 um
-        B4               0.0001       Band 4 (near infrared) surface reflectance, 0.77-0.90 um
-        B5               0.0001       Band 5 (shortwave infrared 1) surface reflectance, 1.55-1.75 um
-        B6               0.1          Band 6 brightness temperature (Kelvin), 10.40-12.50 um
-        B7               0.0001       Band 7 (shortwave infrared 2) surface reflectance, 2.08-2.35 um
-        sr_atmos_opacity 0.001        Atmospheric opacity; < 0.1 = clear; 0.1 - 0.3 = average; > 0.3 = hazy
-        sr_cloud_qa                   Cloud quality attributes, see SR Cloud QA table. Note:
-                                          pixel_qa is likely to present more accurate results
-                                          than sr_cloud_qa for cloud masking. See page 14 in
-                                          the LEDAPS product guide.
-        pixel_qa                      Pixel quality attributes generated from the CFMASK algorithm,
-                                          see Pixel QA table
-        radsat_qa                     Radiometric saturation QA, see Radiometric Saturation QA table
-        '''
-        newnames = ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'TEMP1', 'SWIR2',
-                    'sr_atmos_opacity', 'sr_cloud_qa', 'pixel_qa', 'radsat_qa']
-        return img.rename(newnames)
+        scaled = optical_bands.addBands(thermal_band).select(
+            ['SR_B1', 'SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B7', 'B6(_VCID_1)?'],
+            ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1']
+        )
+
+        # Mask clouds and cloud-shadowed pixels
+        # mask = get_cloud_mask(image=image)
+
+        # Put the new bands back into the original image container and mask them.
+        return (
+            image.select()
+            .addBands(scaled)
+        #    .updateMask(mask)
+        )
 
     @staticmethod
-    def rescale_l57(img: ee.Image) -> ee.Image:
-        '''
-        Args
-        - img: ee.Image, Landsat 5/7 image, with bands already renamed
-            by rename_157()
+    def prep_l89(image: ee.Image) -> ee.Image:
 
-        Returns
-        - img: ee.Image, with bands rescaled
-        '''
-        opt = img.select(['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2'])
-        atmos = img.select(['sr_atmos_opacity'])
-        therm = img.select(['TEMP1'])
-        masks = img.select(['sr_cloud_qa', 'pixel_qa', 'radsat_qa'])
+        """Scale and mask clouds for L8/9 Collection 2 Surface Reflectance"""
 
-        opt = opt.multiply(0.0001)
-        atmos = atmos.multiply(0.001)
-        therm = therm.multiply(0.1)
+        # Scale bands
+        optical_bands = image.select('SR_B.').multiply(0.0000275).add(-0.2)
+        # thermal_band = image.select('ST_B10').multiply(0.00341802).add(149.0)
 
-        scaled = ee.Image.cat([opt, therm, masks, atmos]).copyProperties(img)
-        # system properties are not copied
-        scaled = scaled.set('system:time_start', img.get('system:time_start'))
-        return scaled
+        # Replace thermal pixels with corresponding TOA values (SR missing over much of SSA)
+        thermal_band = image.select('B10')
+
+        # Insert the scaled bands back into the original image container.
+        scaled = optical_bands.addBands(thermal_band).select(
+            ['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7', 'B10'],
+            ['BLUE', 'GREEN', 'RED', 'NIR', 'SWIR1', 'SWIR2', 'TEMP1'],
+        )
+
+        # Mask clouds and cloud-shadowed pixels
+        # mask = get_cloud_mask(image=image)
+
+        # Put the new bands back into the original image container and mask them.
+        return (
+            image.select()
+            .addBands(scaled)
+        #    .updateMask(mask)
+        )
+        
+            
